@@ -25,16 +25,30 @@ export async function GET() {
       try {
         state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
         
-        // Strip samples to save bandwidth and prevent dashboard freezing
+        // Strip massive forensic data from open positions and closed trades
+        // This makes the dashboard polling response very lightweight (< 100KB)
+        const stripForensics = (analytics: any) => {
+            if (!analytics) return analytics;
+            const { samples, checkpoints, contextFeatures, contextWindow, ...rest } = analytics;
+            return rest;
+        };
+
+        if (state && state.candidates && state.candidates.CONFLUENCE && state.candidates.CONFLUENCE.positions) {
+            state.candidates.CONFLUENCE.positions = state.candidates.CONFLUENCE.positions.map((p: any) => {
+                if (p.analytics) {
+                    return { ...p, analytics: stripForensics(p.analytics) };
+                }
+                return p;
+            });
+        }
+
         if (state && state.allTrades) {
             state.allTrades = state.allTrades.map((trade: any) => {
-                if (trade.analytics && trade.analytics.samples) {
-                    const { samples, ...restAnalytics } = trade.analytics;
-                    return { ...trade, analytics: restAnalytics };
+                if (trade.analytics) {
+                    return { ...trade, analytics: stripForensics(trade.analytics) };
                 }
-                if (trade.entryAnalytics && trade.entryAnalytics.samples) {
-                    const { samples, ...restAnalytics } = trade.entryAnalytics;
-                    return { ...trade, entryAnalytics: restAnalytics };
+                if (trade.entryAnalytics) {
+                    return { ...trade, entryAnalytics: stripForensics(trade.entryAnalytics) };
                 }
                 return trade;
             });

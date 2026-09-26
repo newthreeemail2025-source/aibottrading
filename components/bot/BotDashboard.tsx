@@ -67,7 +67,7 @@ export function BotDashboard() {
         setTimeLeftStr('--:--');
       } finally {
         if (!isCancelled) {
-          timerId = setTimeout(fetchState, 1000);
+          timerId = setTimeout(fetchState, 2000);
         }
       }
     };
