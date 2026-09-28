@@ -354,7 +354,74 @@ export function BotDashboard() {
         );
       })()}
 
-      {/* Active Trades */}
+      {/* LIVE MARKET VS BOT PREDICTION */}
+      {(() => {
+         const openPos = botState?.candidates?.CONFLUENCE?.positions || [];
+         if (openPos.length === 0) return null;
+         return (
+            <div className="bg-[#181A20] rounded-xl border border-blue-900/50 p-6 shadow-xl mb-6 flex-1 flex flex-col">
+              <h2 className="text-lg font-bold text-blue-400 mb-4 flex items-center gap-2">
+                <span className="animate-pulse">🔴</span> LIVE MARKET VS BOT PREDICTION
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {openPos.map((p: any, idx: number) => {
+                  let lp = p.analytics?.livePrediction;
+                  
+                  if (!lp) {
+                    const currentPrice = p.dir === 'LONG' ? botState?.currentBid : botState?.currentAsk;
+                    if (currentPrice) {
+                        const movePct = (currentPrice - p.entryPrice) / p.entryPrice * 100;
+                        const actualMoveNormalized = p.dir === 'LONG' ? movePct : -movePct;
+                        const expectedMovePct = p.analytics?.dynamicRisk?.tpDistancePct != null ? p.analytics.dynamicRisk.tpDistancePct * 100 : 0.7;
+                        lp = {
+                            expectedMovePct,
+                            actualMoveNormalized,
+                            predictionErrorPct: actualMoveNormalized - expectedMovePct
+                        };
+                    }
+                  }
+                  
+                  if (!lp) return null;
+
+                  return (
+                    <div key={idx} className="bg-[#0f1115] border border-gray-800 rounded-lg p-4">
+                      <div className="flex justify-between items-center mb-3">
+                        <span className="text-sm font-bold text-gray-300">Trade #{idx + 1} — <span className={p.dir === 'LONG' ? 'text-green-500' : 'text-red-500'}>{p.dir}</span></span>
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex justify-between">
+                          <span className="text-xs text-gray-500">Bot Expected Move:</span>
+                          <span className="text-xs font-mono font-bold text-blue-400">
+                            {lp.expectedMovePct >= 0 ? '+' : ''}{lp.expectedMovePct?.toFixed(2)}%
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-xs text-gray-500">Actual Market Move:</span>
+                          <span className={`text-xs font-mono font-bold ${lp.actualMoveNormalized >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {lp.actualMoveNormalized >= 0 ? '+' : ''}{lp.actualMoveNormalized?.toFixed(2)}%
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-xs text-gray-500">Difference:</span>
+                          <span className={`text-xs font-mono font-bold ${lp.predictionErrorPct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {lp.predictionErrorPct >= 0 ? '+' : ''}{lp.predictionErrorPct?.toFixed(2)}%
+                          </span>
+                        </div>
+                        <div className="w-full h-px bg-gray-800 my-2"></div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs font-bold text-white uppercase">Prediction Error:</span>
+                          <span className={`text-sm font-mono font-bold px-2 py-0.5 rounded ${lp.predictionErrorPct >= 0 ? 'bg-green-900/30 text-green-400 border border-green-800' : 'bg-red-900/30 text-red-400 border border-red-800'}`}>
+                            {lp.predictionErrorPct >= 0 ? '+' : ''}{lp.predictionErrorPct?.toFixed(2)}%
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+         );
+      })()}
 
       <div className="bg-[#181A20] rounded-xl border border-gray-800 p-6 shadow-xl flex-1 flex flex-col">
         <div className="flex justify-between items-end mb-6">
