@@ -11,7 +11,8 @@ const WATCHLIST = [
 const REPORTS = [
   { name: 'Live State JSON', file: 'live-state.json', type: 'file' },
   { name: 'Spawn Debug Log', file: 'spawn-debug.log', type: 'file' },
-  { name: 'All Trades Forensic Analysis', file: 'analyze', type: 'api' }
+  { name: 'All Trades Forensic Analysis', file: 'analyze', type: 'api' },
+  { name: 'Bot vs Market Analysis', file: 'bot-vs-market', type: 'api' }
 ];
 
 export const Sidebar = () => {
