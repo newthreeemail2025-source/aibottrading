@@ -165,6 +165,92 @@ export async function GET() {
         }
         
         reportMarkdown += `
+### 7. BOT EXPECTATION vs ACTUAL MARKET
+`;
+        if (analytics && analytics.predictionHistory && analytics.predictionHistory.length > 0) {
+          reportMarkdown += `| Time | Bot Expected | Actual | Difference | Prediction Error |
+|------|--------------|--------|------------|------------------|
+`;
+          for (const cp of analytics.predictionHistory) {
+              const expected = cp.expectedMovePct != null ? (cp.expectedMovePct >= 0 ? '+' : '') + cp.expectedMovePct.toFixed(3) + '%' : 'N/A';
+              const actual = cp.actualMovePct != null ? (cp.actualMovePct >= 0 ? '+' : '') + cp.actualMovePct.toFixed(3) + '%' : 'N/A';
+              const diff = cp.predictionErrorPct != null ? (cp.predictionErrorPct >= 0 ? '+' : '') + cp.predictionErrorPct.toFixed(3) + '%' : 'N/A';
+              reportMarkdown += `| ${cp.elapsedSeconds}s | ${expected} | ${actual} | ${diff} | ${diff} |
+`;
+          }
+          reportMarkdown += `
+`;
+        } else {
+          reportMarkdown += `*No checkpoints recorded.*
+
+`;
+        }
+        
+        if (analytics && analytics.exit && analytics.exit.finalPredictionError) {
+          const fp = analytics.exit.finalPredictionError;
+          reportMarkdown += `**Final Prediction Error (at exit):** ${fp.predictionErrorPct != null ? (fp.predictionErrorPct >= 0 ? '+' : '') + fp.predictionErrorPct.toFixed(3) + '%' : 'N/A'}
+
+`;
+        }
+
+        reportMarkdown += `### 8. DYNAMIC TP/SL
+`;
+        if (analytics && analytics.dynamicRisk) {
+          const dr = analytics.dynamicRisk;
+          reportMarkdown += `- **Entry Price**: $${dr.entryPrice != null ? dr.entryPrice.toFixed(2) : 'N/A'}
+`;
+          reportMarkdown += `- **Dynamic TP**: $${dr.tpPrice != null ? dr.tpPrice.toFixed(2) : 'N/A'}
+`;
+          reportMarkdown += `- **Dynamic SL**: $${dr.slPrice != null ? dr.slPrice.toFixed(2) : 'N/A'}
+`;
+          reportMarkdown += `- **TP Distance %**: ${dr.tpDistancePct != null ? (dr.tpDistancePct * 100).toFixed(3) + '%' : 'N/A'}
+`;
+          reportMarkdown += `- **SL Distance %**: ${dr.slDistancePct != null ? (dr.slDistancePct * 100).toFixed(3) + '%' : 'N/A'}
+`;
+          reportMarkdown += `- **Risk/Reward**: ${dr.riskRewardRatio != null ? dr.riskRewardRatio.toFixed(2) : 'N/A'}
+`;
+          const exitInfo = analytics.exit || {};
+          reportMarkdown += `- **TP Efficiency**: ${exitInfo.tpEfficiencyPct != null ? exitInfo.tpEfficiencyPct.toFixed(2) + '%' : 'N/A'}
+`;
+          reportMarkdown += `- **SL Utilization**: ${exitInfo.slUtilizationPct != null ? exitInfo.slUtilizationPct.toFixed(2) + '%' : 'N/A'}
+`;
+          reportMarkdown += `- **Calculation Reason**: ${dr.calculationReason ?? 'N/A'}
+`;
+          reportMarkdown += `- **Calculation Timestamp**: ${dr.calculatedAt ? new Date(dr.calculatedAt).toISOString() : 'N/A'}
+
+`;
+        } else {
+          reportMarkdown += `*No dynamic TP/SL data recorded.*
+
+`;
+        }
+
+        reportMarkdown += `### 9. POST-ENTRY TIMELINE
+`;
+        if (analytics && analytics.exit) {
+          const exitInfo = analytics.exit;
+          reportMarkdown += `- **Time to first favorable movement**: ${exitInfo.timeToFirstFavorableMs != null ? (exitInfo.timeToFirstFavorableMs / 1000).toFixed(1) + 's' : 'N/A'}
+`;
+          reportMarkdown += `- **Time to first unfavorable movement**: ${exitInfo.timeToFirstUnfavorableMs != null ? (exitInfo.timeToFirstUnfavorableMs / 1000).toFixed(1) + 's' : 'N/A'}
+`;
+          reportMarkdown += `- **Time to MFE**: ${exitInfo.timeToMFEMs != null ? (exitInfo.timeToMFEMs / 1000).toFixed(1) + 's' : 'N/A'}
+`;
+          reportMarkdown += `- **Time to MAE**: ${exitInfo.timeToMAEMs != null ? (exitInfo.timeToMAEMs / 1000).toFixed(1) + 's' : 'N/A'}
+`;
+          reportMarkdown += `- **Time to TP**: ${exitReason === 'TP' && holdDurationMs ? (holdDurationMs / 1000).toFixed(1) + 's' : 'N/A'}
+`;
+          reportMarkdown += `- **Time to SL**: ${exitReason === 'SL' && holdDurationMs ? (holdDurationMs / 1000).toFixed(1) + 's' : 'N/A'}
+`;
+          reportMarkdown += `- **Exit Time**: ${exitInfo.timestamp ? new Date(exitInfo.timestamp).toISOString() : 'N/A'}
+
+`;
+        } else {
+          reportMarkdown += `*No post-entry timeline data recorded.*
+
+`;
+        }
+
+        reportMarkdown += `
 ### 4. TRADE PATH
 `;
         reportMarkdown += `- **MFE**: $${trade.MFE != null ? trade.MFE.toFixed(2) : 'N/A'}

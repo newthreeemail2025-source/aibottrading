@@ -161,6 +161,18 @@ function updateEntryAnalytics(p, execPrice, now, bid, ask, mid, bidQty, askQty, 
         a.timeToMAE = elapsed;
         a.maxAdversePrice = execPrice;
     }
+    if (favorableMove > 0 && a.timeToFirstFavorable === null) a.timeToFirstFavorable = elapsed;
+    if (adverseMove > 0 && a.timeToFirstUnfavorable === null) a.timeToFirstUnfavorable = elapsed;
+
+    const expectedMovePct = a.dynamicRisk ? a.dynamicRisk.tpDistancePct * 100 : (TP_PCT * 100);
+    const actualMoveNormalized = p.dir === 'LONG' ? movePct : -movePct;
+    const predictionErrorPct = actualMoveNormalized - expectedMovePct;
+    
+    a.livePrediction = {
+        expectedMovePct: safeNum(expectedMovePct, 8),
+        actualMoveNormalized: safeNum(actualMoveNormalized, 8),
+        predictionErrorPct: safeNum(predictionErrorPct, 8)
+    };
 
     const sample = {
         elapsedMs: elapsed,
@@ -190,8 +202,19 @@ function updateEntryAnalytics(p, execPrice, now, bid, ask, mid, bidQty, askQty, 
 
     for (const checkpointMs of ENTRY_ANALYTICS_CHECKPOINTS_MS) {
         if (elapsed >= checkpointMs && !a.checkpoints[String(checkpointMs)]) {
-            a.checkpoints[String(checkpointMs)] = sample;
-            console.log(`[ENTRY CHECKPOINT #${a.entryId}] +${checkpointMs / 1000}s | Move ${movePct >= 0 ? '+' : ''}${movePct.toFixed(3)}% | MFE ${pctMove(p.dir, p.entryPrice, p.entryPrice + p.mfeMove * (p.dir === 'LONG' ? 1 : -1)).toFixed(3)}% | MAE ${pctMove(p.dir, p.entryPrice, p.entryPrice - p.maeMove * (p.dir === 'LONG' ? 1 : -1)).toFixed(3)}%`);
+            const expectedMovePct = a.dynamicRisk ? a.dynamicRisk.tpDistancePct * 100 : (TP_PCT * 100);
+            const actualMoveNormalized = p.dir === 'LONG' ? movePct : -movePct;
+            const predictionErrorPct = actualMoveNormalized - expectedMovePct;
+            const directionCorrect = actualMoveNormalized > 0;
+            
+            a.checkpoints[String(checkpointMs)] = {
+                ...sample,
+                botExpectedMovePct: safeNum(expectedMovePct, 8),
+                actualMoveNormalized: safeNum(actualMoveNormalized, 8),
+                predictionErrorPct: safeNum(predictionErrorPct, 8),
+                directionCorrect
+            };
+            console.log(`[ENTRY CHECKPOINT #${a.entryId}] +${checkpointMs / 1000}s | Move ${movePct >= 0 ? '+' : ''}${movePct.toFixed(3)}% | NormMove ${actualMoveNormalized >= 0 ? '+' : ''}${actualMoveNormalized.toFixed(3)}% | Err ${predictionErrorPct >= 0 ? '+' : ''}${predictionErrorPct.toFixed(3)}%`);
         }
     }
 }
@@ -204,8 +227,23 @@ function finalizeEntryAnalytics(p, execPrice, now, reason) {
     const exitFee = execPrice * p.qty * TAKER_FEE;
     const totalFees = p.entryFee + exitFee;
     const netPnl = grossPnl - totalFees;
+    const predictionHistory = [];
+    if (a.checkpoints) {
+        for (const [key, cp] of Object.entries(a.checkpoints)) {
+            predictionHistory.push({
+                elapsedSeconds: Number(key) / 1000,
+                timestamp: cp.timestamp || null,
+                expectedMovePct: cp.botExpectedMovePct || null,
+                actualMovePct: cp.actualMoveNormalized || null,
+                differencePct: cp.predictionErrorPct || null,
+                predictionErrorPct: cp.predictionErrorPct || null
+            });
+        }
+    }
+
     const result = {
         ...a,
+        predictionHistory,
         exit: {
             timestamp: now,
             isoTime: new Date(now).toISOString(),
@@ -218,11 +256,16 @@ function finalizeEntryAnalytics(p, execPrice, now, reason) {
             maePct: safeNum((p.maeMove / p.entryPrice) * 100, 8),
             timeToMFEMs: a.timeToMFE,
             timeToMAEMs: a.timeToMAE,
+            timeToFirstFavorableMs: a.timeToFirstFavorable,
+            timeToFirstUnfavorableMs: a.timeToFirstUnfavorable,
+            tpEfficiencyPct: a.dynamicRisk && a.dynamicRisk.tpDistancePct > 0 ? safeNum(((p.mfeMove / p.entryPrice * 100) / (a.dynamicRisk.tpDistancePct * 100)) * 100, 2) : 0,
+            slUtilizationPct: a.dynamicRisk && a.dynamicRisk.slDistancePct > 0 ? safeNum(((p.maeMove / p.entryPrice * 100) / (a.dynamicRisk.slDistancePct * 100)) * 100, 2) : 0,
             maxFavorablePrice: safeNum(a.maxFavorablePrice, 8),
             maxAdversePrice: safeNum(a.maxAdversePrice, 8),
             grossPnlUsdt: safeNum(grossPnl, 8),
             feesUsdt: safeNum(totalFees, 8),
-            netPnlUsdt: safeNum(netPnl, 8)
+            netPnlUsdt: safeNum(netPnl, 8),
+            finalPredictionError: a.livePrediction || null
         }
     };
     entryAnalyticsCompleted.push(result);
@@ -1921,6 +1964,12 @@ function closePosition(candName, posIndex, execPrice, reason, now) {
 // ---------------------------------------------------------
 // 4. POSITION MANAGEMENT
 // ---------------------------------------------------------
+const DYN_MIN_TP_PCT = 0.005; // 0.5%
+const DYN_MAX_TP_PCT = 0.020; // 2.0%
+const DYN_MIN_SL_PCT = 0.005; // 0.5%
+const DYN_MAX_SL_PCT = 0.015; // 1.5%
+const DYN_MIN_RR = 1.0;
+
 function openPosition(c, dir, ts, entryPrice, reason = '', entrySnapshot = null) {
     const cand = candidates[c];
     const qty = SELECTED_QTY;
@@ -1928,9 +1977,48 @@ function openPosition(c, dir, ts, entryPrice, reason = '', entrySnapshot = null)
     const marginReq = notional / LEVERAGE;
     const entryFee = notional * TAKER_FEE;
 
-    const tpPrice = dir === 'LONG' ? entryPrice * (1 + TP_PCT) : entryPrice * (1 - TP_PCT);
-    const slPrice = dir === 'LONG' ? entryPrice * (1 - SL_PCT) : entryPrice * (1 + SL_PCT);
+    let tpPct = TP_PCT;
+    let slPct = SL_PCT;
+    let calcReason = 'STATIC_FALLBACK';
+    let inputs = null;
+
+    if (entrySnapshot && entrySnapshot.contextFeatures) {
+        const vol = entrySnapshot.contextFeatures.volatility || 0;
+        if (vol > 0) {
+            const expectedMovePct = vol * Math.sqrt(15);
+            let dynamicTpPct = expectedMovePct / 100;
+            let dynamicSlPct = dynamicTpPct / 1.5;
+            
+            tpPct = Math.max(DYN_MIN_TP_PCT, Math.min(dynamicTpPct, DYN_MAX_TP_PCT));
+            slPct = Math.max(DYN_MIN_SL_PCT, Math.min(dynamicSlPct, DYN_MAX_SL_PCT));
+            
+            if (tpPct / slPct < DYN_MIN_RR) {
+                slPct = tpPct / DYN_MIN_RR;
+            }
+            calcReason = 'VOLATILITY_SCALED';
+            inputs = { volatility: vol, expected15mMovePct: expectedMovePct };
+        }
+    }
+
+    const tpPrice = dir === 'LONG' ? entryPrice * (1 + tpPct) : entryPrice * (1 - tpPct);
+    const slPrice = dir === 'LONG' ? entryPrice * (1 - slPct) : entryPrice * (1 + slPct);
     const bailoutPrice = dir === 'LONG' ? entryPrice * (1 - BAILOUT_PCT) : entryPrice * (1 + BAILOUT_PCT);
+
+    const dynamicRisk = {
+        entryPrice,
+        tpPrice: safeNum(tpPrice, 8),
+        slPrice: safeNum(slPrice, 8),
+        tpDistancePct: safeNum(tpPct, 8),
+        slDistancePct: safeNum(slPct, 8),
+        riskRewardRatio: safeNum(tpPct / slPct, 2),
+        calculatedAt: ts,
+        calculationReason: calcReason,
+        inputs
+    };
+
+    if (entrySnapshot) {
+        entrySnapshot.dynamicRisk = dynamicRisk;
+    }
 
     cand.positions.push({
         dir, entryTs: ts, entryPrice, qty,
@@ -1944,6 +2032,8 @@ function openPosition(c, dir, ts, entryPrice, reason = '', entrySnapshot = null)
             checkpoints: {},
             timeToMFE: null,
             timeToMAE: null,
+            timeToFirstFavorable: null,
+            timeToFirstUnfavorable: null,
             maxFavorablePrice: entryPrice,
             maxAdversePrice: entryPrice
         } : null

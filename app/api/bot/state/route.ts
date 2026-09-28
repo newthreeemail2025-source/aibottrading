@@ -29,7 +29,7 @@ export async function GET() {
         // This makes the dashboard polling response very lightweight (< 100KB)
         const stripForensics = (analytics: any) => {
             if (!analytics) return analytics;
-            const { samples, checkpoints, contextFeatures, contextWindow, ...rest } = analytics;
+            const { samples, checkpoints, predictionHistory, contextFeatures, contextWindow, ...rest } = analytics;
             return rest;
         };
 
