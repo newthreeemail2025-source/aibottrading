@@ -41,18 +41,12 @@ export async function GET() {
                 return p;
             });
         }
-
-        if (state && state.allTrades) {
-            state.allTrades = state.allTrades.map((trade: any) => {
-                if (trade.analytics) {
-                    return { ...trade, analytics: stripForensics(trade.analytics) };
-                }
-                if (trade.entryAnalytics) {
-                    return { ...trade, entryAnalytics: stripForensics(trade.entryAnalytics) };
-                }
-                return trade;
-            });
+        
+        // Remove allTrades entirely to save massive bandwidth
+        if (state) {
+            delete state.allTrades;
         }
+
       } catch(e) {}
     }
 

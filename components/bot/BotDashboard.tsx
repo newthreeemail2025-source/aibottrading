@@ -465,7 +465,7 @@ export function BotDashboard() {
             </thead>
             <tbody className="text-sm font-mono">
               {(() => {
-                let displayTrades = botState?.allTrades ? [...botState.allTrades] : [];
+                let displayTrades: any[] = [];
 
                 // Inject Open Positions
                 if (botState?.candidates?.CONFLUENCE?.positions) {
