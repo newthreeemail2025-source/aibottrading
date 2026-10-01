@@ -1981,6 +1981,71 @@ const DYN_MIN_SL_PCT = 0.005; // 0.5%
 const DYN_MAX_SL_PCT = 0.015; // 1.5%
 const DYN_MIN_RR = 1.0;
 
+function calculateDynamicRiskPlan(dir, entryPrice, entrySnapshot, ts) {
+    const MIN_TP_PCT = 0.003; // 0.3%
+    const MAX_TP_PCT = 0.020; // 2.0%
+    const MIN_SL_PCT = 0.003; // 0.3%
+    const MAX_SL_PCT = 0.015; // 1.5%
+    const TARGET_HORIZON_SEC = 300; // 5 minutes
+    const MIN_RR = 1.0;
+
+    let basis = 'DEFAULT_STATIC';
+    let expectedMovePct = 0;
+    
+    let tpPct = TP_PCT;
+    let slPct = SL_PCT;
+
+    if (entrySnapshot && entrySnapshot.frozenPredictions && entrySnapshot.frozenPredictions[TARGET_HORIZON_SEC]) {
+        const pred = entrySnapshot.frozenPredictions[TARGET_HORIZON_SEC];
+        expectedMovePct = pred.expectedMovePct; // normalized for direction
+        
+        const CAPTURE_FACTOR = 0.8;
+        let dynamicTpPct = (expectedMovePct * CAPTURE_FACTOR) / 100;
+        
+        let vol = 0;
+        if (entrySnapshot.contextFeatures && entrySnapshot.contextFeatures.volatility) {
+            vol = entrySnapshot.contextFeatures.volatility;
+        }
+        
+        let expectedAdversePct = vol > 0 ? (vol * Math.sqrt(5)) / 100 : 0;
+        let dynamicSlPct = expectedAdversePct;
+        
+        if (dynamicSlPct < MIN_SL_PCT) {
+            dynamicSlPct = dynamicTpPct / 1.5;
+        }
+        
+        tpPct = Math.max(MIN_TP_PCT, Math.min(dynamicTpPct, MAX_TP_PCT));
+        slPct = Math.max(MIN_SL_PCT, Math.min(dynamicSlPct, MAX_SL_PCT));
+        
+        if (tpPct / slPct < MIN_RR) {
+            slPct = tpPct / MIN_RR;
+        }
+        
+        if (tpPct < (TAKER_FEE * 2.5)) {
+            tpPct = Math.max(MIN_TP_PCT, TAKER_FEE * 2.5);
+            slPct = tpPct / MIN_RR;
+            basis = 'FEE_BOUNDED';
+        } else {
+            basis = 'DYNAMIC_MODEL';
+        }
+    }
+
+    const tpPrice = dir === 'LONG' ? entryPrice * (1 + tpPct) : entryPrice * (1 - tpPct);
+    const slPrice = dir === 'LONG' ? entryPrice * (1 - slPct) : entryPrice * (1 + slPct);
+    
+    return {
+        tpPct: safeNum(tpPct, 8),
+        slPct: safeNum(slPct, 8),
+        tpPrice: safeNum(tpPrice, 8),
+        slPrice: safeNum(slPrice, 8),
+        expectedMovePct: safeNum(expectedMovePct, 8),
+        riskRewardRatio: safeNum(tpPct / slPct, 2),
+        horizonSec: TARGET_HORIZON_SEC,
+        calculatedAt: ts,
+        basis
+    };
+}
+
 function openPosition(c, dir, ts, entryPrice, reason = '', entrySnapshot = null) {
     const cand = candidates[c];
     const qty = SELECTED_QTY;
@@ -1988,48 +2053,7 @@ function openPosition(c, dir, ts, entryPrice, reason = '', entrySnapshot = null)
     const marginReq = notional / LEVERAGE;
     const entryFee = notional * TAKER_FEE;
 
-    let tpPct = TP_PCT;
-    let slPct = SL_PCT;
-    let calcReason = 'STATIC_FALLBACK';
-    let inputs = null;
-
-    if (entrySnapshot && entrySnapshot.contextFeatures) {
-        const vol = entrySnapshot.contextFeatures.volatility || 0;
-        if (vol > 0) {
-            const expectedMovePct = vol * Math.sqrt(15);
-            let dynamicTpPct = expectedMovePct / 100;
-            let dynamicSlPct = dynamicTpPct / 1.5;
-            
-            tpPct = Math.max(DYN_MIN_TP_PCT, Math.min(dynamicTpPct, DYN_MAX_TP_PCT));
-            slPct = Math.max(DYN_MIN_SL_PCT, Math.min(dynamicSlPct, DYN_MAX_SL_PCT));
-            
-            if (tpPct / slPct < DYN_MIN_RR) {
-                slPct = tpPct / DYN_MIN_RR;
-            }
-            calcReason = 'VOLATILITY_SCALED';
-            inputs = { volatility: vol, expected15mMovePct: expectedMovePct };
-        }
-    }
-
-    const tpPrice = dir === 'LONG' ? entryPrice * (1 + tpPct) : entryPrice * (1 - tpPct);
-    const slPrice = dir === 'LONG' ? entryPrice * (1 - slPct) : entryPrice * (1 + slPct);
-    const bailoutPrice = dir === 'LONG' ? entryPrice * (1 - BAILOUT_PCT) : entryPrice * (1 + BAILOUT_PCT);
-
-    const dynamicRisk = {
-        entryPrice,
-        tpPrice: safeNum(tpPrice, 8),
-        slPrice: safeNum(slPrice, 8),
-        tpDistancePct: safeNum(tpPct, 8),
-        slDistancePct: safeNum(slPct, 8),
-        riskRewardRatio: safeNum(tpPct / slPct, 2),
-        calculatedAt: ts,
-        calculationReason: calcReason,
-        inputs
-    };
-
     if (entrySnapshot) {
-        entrySnapshot.dynamicRisk = dynamicRisk;
-
         // ---------------------------------------------------------
         // TIME-SPECIFIC DETERMINISTIC PREDICTION MODEL (FROZEN AT ENTRY)
         // ---------------------------------------------------------
@@ -2088,6 +2112,33 @@ function openPosition(c, dir, ts, entryPrice, reason = '', entrySnapshot = null)
                 inputs: { norm_microEdge, norm_mom1s, norm_ret5, norm_accel, norm_ret15, norm_histEdge }
             };
         }
+    }
+
+    // ---------------------------------------------------------
+    // CALCULATE DYNAMIC RISK PLAN
+    // ---------------------------------------------------------
+    const riskPlan = calculateDynamicRiskPlan(dir, entryPrice, entrySnapshot, ts);
+    const { tpPct, slPct, tpPrice, slPrice } = riskPlan;
+    const bailoutPrice = dir === 'LONG' ? entryPrice * (1 - BAILOUT_PCT) : entryPrice * (1 + BAILOUT_PCT);
+
+    if (entrySnapshot) {
+        // Map to existing dynamicRisk format for compatibility
+        entrySnapshot.dynamicRisk = {
+            entryPrice,
+            tpPrice,
+            slPrice,
+            tpDistancePct: riskPlan.tpPct,
+            slDistancePct: riskPlan.slPct,
+            riskRewardRatio: riskPlan.riskRewardRatio,
+            calculatedAt: ts,
+            calculationReason: riskPlan.basis,
+            inputs: {
+                expectedMovePct: riskPlan.expectedMovePct,
+                horizonSec: riskPlan.horizonSec
+            }
+        };
+        // Also keep raw riskPlan
+        entrySnapshot.riskPlan = riskPlan;
     }
 
     cand.positions.push({
@@ -2312,7 +2363,7 @@ function finalizeSession(reason) {
         let holdStr = t.exitTime ? ((t.exitTime - t.entryTime) / 1000).toFixed(1) + 's' : 'N/A';
         let pBail = t.direction === 'LONG' ? (t.entryPrice * (1 - BAILOUT_PCT)).toFixed(2) : (t.entryPrice * (1 + BAILOUT_PCT)).toFixed(2);
 
-        return `| ${idx + 1} | ${t.direction} | $${t.entryPrice.toFixed(2)} | ${entT} | $${(t.entryPrice * (1 + (t.direction === 'LONG' ? TP_PCT : -TP_PCT))).toFixed(2)} | $${(t.entryPrice * (1 - (t.direction === 'LONG' ? SL_PCT : -SL_PCT))).toFixed(2)} | $${pBail} | $${t.exitPrice ? t.exitPrice.toFixed(2) : 'N/A'} | ${exT} | ${holdStr} | ${t.exitReason} | $${t.grossPnlUsdt.toFixed(4)} | $${t.feesUsdt.toFixed(4)} | $${t.netPnlUsdt.toFixed(4)} |`;
+        return `| ${idx + 1} | ${t.direction} | $${t.entryPrice.toFixed(2)} | ${entT} | $${(t.tpPrice || (t.entryPrice * (1 + (t.direction === 'LONG' ? TP_PCT : -TP_PCT)))).toFixed(2)} | $${(t.slPrice || (t.entryPrice * (1 - (t.direction === 'LONG' ? SL_PCT : -SL_PCT)))).toFixed(2)} | $${pBail} | $${t.exitPrice ? t.exitPrice.toFixed(2) : 'N/A'} | ${exT} | ${holdStr} | ${t.exitReason} | $${t.grossPnlUsdt.toFixed(4)} | $${t.feesUsdt.toFixed(4)} | $${t.netPnlUsdt.toFixed(4)} |`;
     }).join('\\n');
 
     let priceRows = pricesEvery3s.map(p => {
