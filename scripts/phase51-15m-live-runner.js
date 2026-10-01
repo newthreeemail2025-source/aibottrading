@@ -202,19 +202,30 @@ function updateEntryAnalytics(p, execPrice, now, bid, ask, mid, bidQty, askQty, 
 
     for (const checkpointMs of ENTRY_ANALYTICS_CHECKPOINTS_MS) {
         if (elapsed >= checkpointMs && !a.checkpoints[String(checkpointMs)]) {
-            const expectedMovePct = a.dynamicRisk ? a.dynamicRisk.tpDistancePct * 100 : (TP_PCT * 100);
+            const tpDistancePct = a.dynamicRisk ? a.dynamicRisk.tpDistancePct * 100 : (TP_PCT * 100);
             const actualMoveNormalized = p.dir === 'LONG' ? movePct : -movePct;
-            const predictionErrorPct = actualMoveNormalized - expectedMovePct;
+            
+            const T_sec = checkpointMs / 1000;
+            const frozen = a.frozenPredictions && a.frozenPredictions[T_sec] 
+                ? a.frozenPredictions[T_sec] 
+                : null;
+                
+            const botExpectedMovePct = frozen ? frozen.expectedMovePct : tpDistancePct;
+            const botExpectedPrice = frozen ? frozen.expectedPrice : p.entryPrice * (1 + (p.dir === 'LONG' ? tpDistancePct/100 : -tpDistancePct/100));
+            const predictionErrorPct = actualMoveNormalized - botExpectedMovePct;
+            
             const directionCorrect = actualMoveNormalized > 0;
             
             a.checkpoints[String(checkpointMs)] = {
                 ...sample,
-                botExpectedMovePct: safeNum(expectedMovePct, 8),
+                tpDistancePct: safeNum(tpDistancePct, 8),
+                botExpectedMovePct: safeNum(botExpectedMovePct, 8),
+                botExpectedPrice: safeNum(botExpectedPrice, 8),
                 actualMoveNormalized: safeNum(actualMoveNormalized, 8),
                 predictionErrorPct: safeNum(predictionErrorPct, 8),
                 directionCorrect
             };
-            console.log(`[ENTRY CHECKPOINT #${a.entryId}] +${checkpointMs / 1000}s | Move ${movePct >= 0 ? '+' : ''}${movePct.toFixed(3)}% | NormMove ${actualMoveNormalized >= 0 ? '+' : ''}${actualMoveNormalized.toFixed(3)}% | Err ${predictionErrorPct >= 0 ? '+' : ''}${predictionErrorPct.toFixed(3)}%`);
+            console.log(`[ENTRY CHECKPOINT #${a.entryId}] +${T_sec}s | Move ${movePct >= 0 ? '+' : ''}${movePct.toFixed(3)}% | NormMove ${actualMoveNormalized >= 0 ? '+' : ''}${actualMoveNormalized.toFixed(3)}% | Err ${predictionErrorPct >= 0 ? '+' : ''}${predictionErrorPct.toFixed(3)}%`);
         }
     }
 }
@@ -2018,6 +2029,65 @@ function openPosition(c, dir, ts, entryPrice, reason = '', entrySnapshot = null)
 
     if (entrySnapshot) {
         entrySnapshot.dynamicRisk = dynamicRisk;
+
+        // ---------------------------------------------------------
+        // TIME-SPECIFIC DETERMINISTIC PREDICTION MODEL (FROZEN AT ENTRY)
+        // ---------------------------------------------------------
+        const snapshotDir = entrySnapshot.direction;
+        const microEdgePct = entrySnapshot.microEdgePct || 0;
+        const momentum1sPct = entrySnapshot.momentum1sPct || 0;
+        
+        let ret5 = 0, accel = 0, ret15 = 0, histEdge = 0;
+        if (entrySnapshot.contextFeatures) {
+            ret5 = entrySnapshot.contextFeatures.ret5 || 0;
+            accel = entrySnapshot.contextFeatures.acceleration || 0;
+            ret15 = entrySnapshot.contextFeatures.ret15 || 0;
+        }
+        if (entrySnapshot.historical) {
+            histEdge = entrySnapshot.historical.directionEdge || 0;
+        }
+
+        const norm_microEdge = (snapshotDir === 'LONG') ? microEdgePct : -microEdgePct;
+        const norm_mom1s = (snapshotDir === 'LONG') ? momentum1sPct : -momentum1sPct;
+        const norm_ret5 = (snapshotDir === 'LONG') ? ret5 : -ret5;
+        const norm_accel = (snapshotDir === 'LONG') ? accel : -accel;
+        const norm_ret15 = (snapshotDir === 'LONG') ? ret15 : -ret15;
+        const norm_histEdge = histEdge; // already directional
+
+        entrySnapshot.frozenPredictions = {};
+
+        const horizons = [10, 30, 60, 120, 180, 300, 600, 900];
+        for (const T_sec of horizons) {
+            const T_min = T_sec / 60.0;
+            let expectedMovePct = 0;
+
+            if (T_sec <= 30) {
+                // Ultra-short: exponential decay for micro and momentum projection
+                expectedMovePct = norm_microEdge * Math.exp(-T_sec/10) + norm_mom1s * T_sec * Math.exp(-T_sec/15);
+            } else if (T_sec <= 180) {
+                // Short: 1m, 2m, 3m
+                const velocity = norm_ret5 / 5.0;
+                const aVal = norm_accel / 5.0;
+                expectedMovePct = (velocity * T_min) + (0.5 * aVal * Math.pow(T_min, 2));
+            } else {
+                // Medium: 5m, 10m, 15m
+                const trend_projection = (norm_ret15 / 15.0) * T_min;
+                const knn_projection = norm_histEdge * (T_min / 15.0);
+                expectedMovePct = (trend_projection + knn_projection) / 2.0;
+            }
+
+            const expectedPrice = (snapshotDir === 'LONG') 
+                ? entryPrice * (1 + expectedMovePct / 100)
+                : entryPrice * (1 - expectedMovePct / 100);
+
+            entrySnapshot.frozenPredictions[T_sec] = {
+                horizonSec: T_sec,
+                expectedMovePct: safeNum(expectedMovePct, 8),
+                expectedPrice: safeNum(expectedPrice, 8),
+                calculatedAt: ts,
+                inputs: { norm_microEdge, norm_mom1s, norm_ret5, norm_accel, norm_ret15, norm_histEdge }
+            };
+        }
     }
 
     cand.positions.push({

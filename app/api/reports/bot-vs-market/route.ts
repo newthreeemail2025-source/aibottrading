@@ -44,12 +44,7 @@ export async function GET() {
                  const expectedMove = cp.botExpectedMovePct || 0;
                  const errorMove = cp.predictionErrorPct || 0;
                  
-                 let expectedPrice = 0;
-                 if (direction === 'LONG') {
-                     expectedPrice = entryPrice * (1 + expectedMove / 100);
-                 } else {
-                     expectedPrice = entryPrice * (1 - expectedMove / 100);
-                 }
+                 const expectedPrice = cp.botExpectedPrice || entryPrice;
                  
                  const actualPrice = cp.price || entryPrice; // Raw market price from checkpoint
                  const priceDiff = actualPrice - expectedPrice;
